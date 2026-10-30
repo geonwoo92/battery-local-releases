@@ -1,0 +1,43 @@
+name: Generate update manifest
+on:
+  release:
+    types: [published, edited]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag containing BatteryLocal.apk
+        required: true
+        type: string
+permissions:
+  contents: write
+jobs:
+  manifest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      RELEASE_TAG: ${{ github.event.release.tag_name || inputs.tag }}
+    steps:
+      - name: Download release APK
+        run: gh release download "$RELEASE_TAG" --pattern BatteryLocal.apk --dir dist
+      - name: Read Android version and checksum
+        shell: python
+        run: |
+          import hashlib, json, os, pathlib, re, subprocess
+          apk = pathlib.Path('dist/BatteryLocal.apk')
+          sdk = pathlib.Path(os.environ.get('ANDROID_HOME', os.environ.get('ANDROID_SDK_ROOT', '')))
+          tools = sorted(sdk.glob('build-tools/*/aapt'))
+          if not tools:
+              raise SystemExit('Android build-tools aapt was not found')
+          badging = subprocess.check_output([str(tools[-1]), 'dump', 'badging', str(apk)], text=True)
+          match = re.search(r"package: name='([^']+)' versionCode='(\d+)' versionName='([^']+)'", badging)
+          if not match or match[1] != 'dev.teslabattery.local':
+              raise SystemExit('APK is not Battery Local')
+          if int(match[2]) < 1:
+              raise SystemExit('versionCode must be positive')
+          metadata = {'packageName': match[1], 'versionCode': int(match[2]), 'versionName': match[3],
+                      'apk': 'BatteryLocal.apk', 'sha256': hashlib.sha256(apk.read_bytes()).hexdigest()}
+          pathlib.Path('dist/update.json').write_text(json.dumps(metadata, indent=2) + '\n', encoding='utf-8')
+      - name: Attach update manifest
+        run: gh release upload "$RELEASE_TAG" dist/update.json --clobber
